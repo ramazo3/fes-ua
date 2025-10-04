@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FES-UA Rule Engine Prototype (GCP-Native)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7f9fb;
+        }
+    </style>
+</head>
+<body class="p-4 sm:p-8">
+
+    <div class="max-w-4xl mx-auto bg-white shadow-2xl rounded-xl p-6 md:p-10 border border-blue-100">
+        <header class="mb-8">
+            <h1 class="text-3xl font-bold text-gray-800">
+                FES-UA Authorization Simulator
+            </h1>
+            <p class="text-gray-600 mt-2">
+                Simulates the **Real-Time Authorization Webhook** decision process on GCP Cloud Run. Decisions are based on FES-UA Spending Rules.
+            </p>
+            <div class="mt-4 p-3 bg-blue-50 rounded-lg text-sm text-blue-700">
+                **Note:** This prototype enforces two complex rules: **Frequency Limits (2-Year Device Rule)** and **Category Specific Caps ($299 Cap)**.
+            </div>
+        </header>
+
+        <!-- Transaction Input Section -->
+        <section class="grid md:grid-cols-3 gap-6 mb-8 border-b pb-8">
+            <div>
+                <label for="studentId" class="block text-sm font-medium text-gray-700 mb-1">Student ID (Cardholder)</label>
+                <select id="studentId" class="w-full border-gray-300 rounded-lg shadow-sm focus:ring-blue-500 focus:border-blue-500 p-2.5">
+                    <option value="S_2025_001">Student A (Last Device: 100 days ago)</option>
+                    <option value="S_2025_002">Student B (Last Device: 800 days ago)</option>
+                    <option value="S_2025_003">Student C (YTD Spend: $290.00)</option>
+                </select>
+            </div>
+            <div>
+                <label for="mcc" class="block text-sm font-medium text-gray-700 mb-1">Merchant Category Code (MCC)</label>
+                <select id="mcc" class="w-full border-gray-300 rounded-lg shadow-sm focus:ring-blue-500 focus:border-blue-500 p-2.5">
+                    <option value="5732">5732 (Electronics/Computer Stores)</option>
+                    <option value="7996">7996 (Amusement Parks/Carnivals)</option>
+                    <option value="8211">8211 (Schools/Educational Services)</option>
+                </select>
+            </div>
+            <div>
+                <label for="amount" class="block text-sm font-medium text-gray-700 mb-1">Transaction Amount (USD)</label>
+                <input type="number" id="amount" value="300" min="0.01" step="0.01" class="w-full border-gray-300 rounded-lg shadow-sm focus:ring-blue-500 focus:border-blue-500 p-2.5">
+            </div>
+            <div class="md:col-span-3 pt-4">
+                <button onclick="processTransaction()" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-4 rounded-lg shadow-md transition duration-150 ease-in-out transform hover:scale-[1.01]">
+                    Process Airwallex Authorization Webhook
+                </button>
+            </div>
+        </section>
+
+        <!-- Decision Output Section -->
+        <section>
+            <h2 class="text-xl font-semibold text-gray-800 mb-4">Real-Time Decision:</h2>
+
+            <div id="decisionOutput" class="p-6 rounded-lg border-2 border-dashed border-gray-300 text-center">
+                <p class="text-gray-500">Awaiting Transaction...</p>
+            </div>
+        </section>
+    </div>
+
+    <!-- JavaScript Simulation Logic -->
+    <script>
+        // --- MOCK DATA (Simulates Firestore/Redis Caching) ---
+        // Dates are represented as Days Ago for easy simulation/testing of the 730-day rule.
+        const MOCK_USER_HISTORY = {
+            "S_2025_001": {
+                name: "Student A (Recent Device)",
+                lastDevicePurchaseDaysAgo: 100, // Deny (too recent)
+                ytdThemeParkSpend: 150.00
+            },
+            "S_2025_002": {
+                name: "Student B (Old Device)",
+                lastDevicePurchaseDaysAgo: 800, // Approve (outside limit)
+                ytdThemeParkSpend: 50.00
+            },
+            "S_2025_003": {
+                name: "Student C (High YTD Spend)",
+                lastDevicePurchaseDaysAgo: 1200,
+                ytdThemeParkSpend: 290.00 // Close to $299 limit
+            }
+        };
+
+        // Rule Constants (Simulating OPA Rego Variables)
+        const RULE_CONSTANTS = {
+            MIN_DEVICE_FREQUENCY_DAYS: 730, // 2 years
+            MAX_THEME_PARK_CAP: 299.00, // $299 annual cap
+            RESTRICTED_DEVICE_MCCS: ["5045", "5732", "5941"], // Electronics, Computer Stores, Sporting Goods
+            THEME_PARK_MCCS: ["7996", "7991"] // Amusement Parks, Public Golf Courses (leisure type)
+        };
+
+        /**
+         * Simulates the core OPA/Rego policy execution.
+         * @param {object} transaction - The transaction payload from Airwallex.
+         * @param {object} userHistory - Cached user data from Redis/Firestore.
+         * @returns {{decision: string, reason: string}}
+         */
+        function checkOpaPolicy(transaction, userHistory) {
+            const { mcc, amount } = transaction;
+
+            // --- 1. Rule: frequency_limits (2-Year Device Check) ---
+            if (RULE_CONSTANTS.RESTRICTED_DEVICE_MCCS.includes(mcc)) {
+                if (userHistory.lastDevicePurchaseDaysAgo < RULE_CONSTANTS.MIN_DEVICE_FREQUENCY_DAYS) {
+                    return {
+                        decision: 'DENY',
+                        reason: `Rule: frequency_limits triggered. Last device purchase was ${userHistory.lastDevicePurchaseDaysAgo} days ago. Must be >= ${RULE_CONSTANTS.MIN_DEVICE_FREQUENCY_DAYS} days.`
+                    };
+                }
+            }
+
+            // --- 2. Rule: category_specific_caps ($299 Theme Park Cap) ---
+            if (RULE_CONSTANTS.THEME_PARK_MCCS.includes(mcc)) {
+                const newYtdSpend = userHistory.ytdThemeParkSpend + amount;
+                if (newYtdSpend > RULE_CONSTANTS.MAX_THEME_PARK_CAP) {
+                    return {
+                        decision: 'DENY',
+                        reason: `Rule: category_specific_caps triggered. Transaction amount $${amount.toFixed(2)} exceeds the annual $${RULE_CONSTANTS.MAX_THEME_PARK_CAP.toFixed(2)} theme park cap. YTD spend: $${userHistory.ytdThemeParkSpend.toFixed(2)}.`
+                    };
+                }
+            }
+
+            // --- Default Action ---
+            return { decision: 'APPROVE', reason: 'Meets basic Spending Rules and available balance check (simulated).' };
+        }
+
+
+        /**
+         * Simulates the entire real-time Airwallex Webhook process.
+         */
+        function processTransaction() {
+            const studentId = document.getElementById('studentId').value;
+            const mcc = document.getElementById('mcc').value;
+            const amount = parseFloat(document.getElementById('amount').value);
+            const outputDiv = document.getElementById('decisionOutput');
+
+            if (isNaN(amount) || amount <= 0) {
+                alert("Please enter a valid transaction amount.");
+                return;
+            }
+
+            // 1. Simulate Fetching User Data (from Redis/Firestore)
+            const userHistory = MOCK_USER_HISTORY[studentId];
+            if (!userHistory) {
+                outputDiv.innerHTML = '<p class="text-red-600">ERROR: Invalid Student ID.</p>';
+                return;
+            }
+
+            // 2. Prepare Transaction Payload (simulated Airwallex JSON)
+            const transactionPayload = {
+                cardholder: { id: studentId, name: userHistory.name },
+                transaction: { mcc, amount, currency: 'USD', timestamp: new Date().toISOString() }
+            };
+
+            // 3. Start Latency Timer (Simulates Cloud Run cold start + network)
+            const startTime = performance.now();
+            outputDiv.classList.remove('bg-green-100', 'bg-red-100');
+            outputDiv.classList.add('animate-pulse', 'bg-yellow-50');
+            outputDiv.innerHTML = '<p class="text-lg font-semibold text-yellow-800">Processing...</p>';
+
+            // Simulate the low-latency OPA/Rego execution delay (e.g., 50-200ms)
+            setTimeout(() => {
+                const result = checkOpaPolicy(transactionPayload.transaction, userHistory);
+                const endTime = performance.now();
+                const latency = (endTime - startTime).toFixed(0);
+
+                // 4. Determine Final Decision Output
+                const isApproved = result.decision === 'APPROVE';
+                const bgColor = isApproved ? 'bg-green-100' : 'bg-red-100';
+                const textColor = isApproved ? 'text-green-800' : 'text-red-800';
+                const decisionIcon = isApproved ? '✅ APPROVED' : '❌ DENIED';
+
+                outputDiv.classList.remove('animate-pulse', 'bg-yellow-50');
+                outputDiv.classList.add(bgColor, 'border-solid', 'border-2', isApproved ? 'border-green-400' : 'border-red-400');
+
+                outputDiv.innerHTML = `
+                    <p class="text-2xl font-bold ${textColor} mb-3">${decisionIcon}</p>
+                    <p class="font-semibold text-gray-800">Latency (Decision Time): <span class="font-mono">${latency}ms</span> (Goal: &lt;500ms)</p>
+                    <div class="mt-4 text-left p-4 bg-white rounded-lg shadow-inner">
+                        <p class="text-sm font-medium text-gray-700">Reason:</p>
+                        <p class="text-base font-normal ${textColor} mt-1">${result.reason}</p>
+                    </div>
+                    <div class="mt-4 text-left p-2 bg-gray-50 rounded-lg text-xs text-gray-500">
+                        <p>Student: ${userHistory.name} (${studentId})</p>
+                        <p>MCC: ${mcc}</p>
+                        <p>Amount: $${amount.toFixed(2)}</p>
+                    </div>
+                `;
+
+            }, Math.random() * 150 + 50); // Simulates 50ms to 200ms processing time
+        }
+
+        // Run an initial transaction for demo purposes
+        window.onload = () => {
+             // Delay to allow DOM render
+            setTimeout(() => {
+                document.getElementById('amount').value = 50.00;
+                document.getElementById('mcc').value = '5732'; // Electronics
+                document.getElementById('studentId').value = 'S_2025_001'; // Student A (Recent Device)
+                processTransaction();
+            }, 100);
+        };
+    </script>
+</body>
+</html>
